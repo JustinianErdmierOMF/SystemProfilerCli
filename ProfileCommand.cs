@@ -27,28 +27,20 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
             }
         }
 
+        AnsiConsole.Clear();
+
         // Display header
         Rule rule = new Rule(title: "[bold blue]System Profiler[/]").RuleStyle(style: "blue");
 
         AnsiConsole.Write(rule);
         AnsiConsole.WriteLine();
 
-        string platform = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "Linux" : "macOS";
-
-        Grid grid = new Grid().AddColumn()
-                              .AddColumn()
-                              .AddRow("[grey]Platform:[/]", $"[white]{platform}[/]")
-                              .AddRow("[grey]Processors:[/]", $"[white]{Environment.ProcessorCount}[/]")
-                              .AddRow("[grey]Duration:[/]", $"[white]{settings.Duration} seconds[/]")
-                              .AddRow("[grey]Sample Rate:[/]", $"[white]Every {settings.Rate} second(s)[/]")
-                              .AddRow("[grey]Log Path:[/]", $"[white]{settings.LogPath}[/]");
-
-        AnsiConsole.Write(grid);
+        AnsiConsole.MarkupLine(format: "[grey]Starting profiler... Press [bold yellow]Ctrl+C[/] to stop early.[/]", Justify.Center);
         AnsiConsole.WriteLine();
 
         try
         {
-            await RunProfiler(settings.Duration, settings.Rate, settings.LogPath);
+            await RunProfiler(settings);
 
             AnsiConsole.WriteLine();
             AnsiConsole.MarkupLine(value: $"[green]✓[/] Profiling complete. Results saved to: [link]{settings.LogPath}[/]");
@@ -63,8 +55,12 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
         }
     }
 
-    private static async Task RunProfiler(int durationSeconds, int rateSeconds, string logPath)
+    private static async Task RunProfiler(Settings settings)
     {
+        int    durationSeconds = settings.Duration;
+        int    rateSeconds     = settings.Rate;
+        string logPath         = settings.LogPath;
+
         List<SystemSample> samples     = [];
         Stopwatch          stopwatch   = Stopwatch.StartNew();
         TimeSpan           endTime     = TimeSpan.FromSeconds(durationSeconds);
@@ -78,17 +74,32 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
 
         await Task.Delay(millisecondsDelay: 500);
 
-        AnsiConsole.MarkupLine(value: "[grey]Starting profiler... Press Ctrl+C to stop early.[/]");
-        AnsiConsole.WriteLine();
+        string platform = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "Linux" : "macOS";
+
+        Grid infoGrid = new Grid().AddColumn()
+                                  .AddColumn()
+                                  .AddRow("[grey]User:[/]", $"[white]{Environment.UserName}[/]")
+                                  .AddRow("[grey]Machine:[/]", $"[white]{Environment.MachineName}[/]")
+                                  .AddRow("[grey]Platform:[/]", $"[white]{platform}[/]")
+                                  .AddRow("[grey]Processors:[/]", $"[white]{Environment.ProcessorCount}[/]")
+                                  .AddRow("[grey]Duration:[/]", $"[white]{settings.Duration} seconds[/]")
+                                  .AddRow("[grey]Sample Rate:[/]", $"[white]Every {settings.Rate} second(s)[/]")
+                                  .AddRow("[grey]Log Path:[/]", $"[white]{settings.LogPath}[/]");
 
         // Create a live display table
-        Table table = new Table().Border(TableBorder.Rounded)
-                                 .BorderColor(Color.Grey)
-                                 .AddColumn(column: new TableColumn(header: "[bold]Metric[/]").Centered())
-                                 .AddColumn(column: new TableColumn(header: "[bold]Value[/]").Centered())
-                                 .AddColumn(column: new TableColumn(header: "[bold]Status[/]").Centered());
+        Table metricsTable = new Table().Border(TableBorder.Rounded)
+                                        .BorderColor(Color.Grey)
+                                        .AddColumn(column: new TableColumn(header: "[bold]Metric[/]").Width(width: 25))
+                                        .AddColumn(column: new TableColumn(header: "[bold]Value[/]").Centered()
+                                                                                                    .Width(width: 25))
+                                        .AddColumn(column: new TableColumn(header: "[bold]Status[/]").Centered()
+                                                                                                     .Width(width: 25));
 
-        await AnsiConsole.Live(table)
+        Grid layoutGrid = new Grid().Expand()
+                                    .AddColumns(new GridColumn(), new GridColumn().Alignment(Justify.Right))
+                                    .AddRow(infoGrid, Align.Center(metricsTable));
+
+        await AnsiConsole.Live(layoutGrid)
                          .AutoClear(enabled: false)
                          .Overflow(VerticalOverflow.Ellipsis)
                          .StartAsync(async ctx =>
@@ -102,7 +113,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
                                  samples.Add(sample);
 
                                  // Update the live table
-                                 UpdateTable(table, sample, stopwatch.Elapsed, endTime);
+                                 UpdateTable(metricsTable, sample, stopwatch.Elapsed, endTime);
 
                                  ctx.Refresh();
 
@@ -117,6 +128,11 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
                              }
                          });
 
+        AnsiConsole.WriteLine();
+
+        Rule rule = new Rule().RuleStyle(style: "blue");
+
+        AnsiConsole.Write(rule);
         AnsiConsole.WriteLine();
 
         // Show final summary
@@ -152,7 +168,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
              .AddRow("[blue]Memory[/]", $"[{memColour}]{sample.UsedMemoryMb:F0} / {sample.TotalMemoryMb:F0} MB[/]", CreateProgressBar(sample.MemoryUsagePercent, memColour));
 
         // Add top 3 processes
-        table.AddRow("[grey]─────────[/]", "[grey]Top Processes[/]", "[grey]─────────[/]");
+        table.AddRow("[grey bold]Top Processes ───────────[/]", "[grey bold]─────────────────────────[/]", "[grey bold]─────────────────────────[/]");
 
         int rank = 1;
 
@@ -166,7 +182,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
                 var _ => "  "
             };
 
-            table.AddRow($"{medal} [white]{proc.ProcessName.Truncate(maxLength: 15)}[/]", $"[grey]{proc.WorkingSetMb:F0} MB[/]", $"[grey]{proc.ThreadCount} threads[/]");
+            table.AddRow($"{medal} [white]{proc.ProcessName.Truncate(maxLength: 20)}[/]", $"[grey]{proc.WorkingSetMb:F0} MB[/]", $"[grey]{proc.ThreadCount} threads[/]");
 
             rank++;
         }
@@ -208,9 +224,6 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
         summaryTable.AddRow("[blue]CPU Usage[/]", $"{minCpu:F1}%", $"[yellow]{avgCpu:F1}%[/]", $"[red]{maxCpu:F1}%[/]")
                     .AddRow("[blue]Memory Usage[/]", $"{minMem:F1}%", $"[yellow]{avgMem:F1}%[/]", $"[red]{maxMem:F1}%[/]");
 
-        AnsiConsole.Write(summaryTable);
-        AnsiConsole.WriteLine();
-
         // Top processes table
         var processStats = samples.SelectMany(s => s.Processes)
                                   .GroupBy(p => p.ProcessName)
@@ -238,7 +251,12 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
             processTable.AddRow($"[white]{proc.Name.Truncate(maxLength: 25)}[/]", $"{proc.AvgMemoryMB:F1} MB", $"[yellow]{proc.MaxMemoryMB:F1} MB[/]", $"{proc.AvgThreads:F0}");
         }
 
-        AnsiConsole.Write(processTable);
+        Grid layoutGrid = new Grid().Expand()
+                                    .AddColumns(count: 2)
+                                    .AddRow(summaryTable.Centered(), processTable.Centered());
+
+        AnsiConsole.Write(layoutGrid);
+        AnsiConsole.WriteLine();
     }
 
     private static SystemSample CollectSample(int sampleNumber, CpuMonitor cpuMonitor)
@@ -402,6 +420,8 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
           .AppendLine(value: "                           SYSTEM PROFILE REPORT")
           .AppendLine(value: "================================================================================")
           .AppendLine()
+          .AppendLine(handler: $"User: {Environment.UserName}")
+          .AppendLine(handler: $"Machine: {Environment.MachineName}")
           .AppendLine(handler: $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
           .AppendLine(handler: $"Platform: {RuntimeInformation.OSDescription}")
           .AppendLine(handler: $"Processors: {Environment.ProcessorCount}")
@@ -494,8 +514,8 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
     {
         private const string DefaultLogFileName = "profile.log";
 
-        [ CommandOption(template: "-d|--duration <SECONDS>"), Description(description: "Total duration to sample (in seconds)"), DefaultValue(value: 60) ]
-        public int Duration { get; init; } = 60;
+        [ CommandOption(template: "-d|--duration <SECONDS>"), Description(description: "Total duration to sample (in seconds)"), DefaultValue(value: 5) ]
+        public int Duration { get; init; } = 10;
 
         [ CommandOption(template: "-r|--rate <SECONDS>"), Description(description: "Interval between samples (in seconds)"), DefaultValue(value: 2) ]
         public int Rate { get; init; } = 2;
