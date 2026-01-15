@@ -126,7 +126,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
                              }
 
                              // Update the table once more to get a final sample and set the live table to 100%.
-                             SystemSample finalSample = CollectSample(sampleCount, cpuMonitor);
+                             SystemSample finalSample = CollectSample(sampleCount + 1, cpuMonitor);
 
                              samples.Add(finalSample);
 
