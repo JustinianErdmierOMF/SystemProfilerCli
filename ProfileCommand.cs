@@ -9,7 +9,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
     public override async Task<int> ExecuteAsync(CommandContext context, Settings settings, CancellationToken cancellationToken)
     {
         // Ensure the directory exists
-        string? directory = Path.GetDirectoryName(settings.LogPath);
+        string? directory = Path.GetDirectoryName(Settings.DirectoryPath);
 
         if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
         {
@@ -43,7 +43,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
             await RunProfiler(settings);
 
             AnsiConsole.WriteLine();
-            AnsiConsole.MarkupLine(value: $"[green]✓[/] Profiling complete. Results saved to: [link]{settings.LogPath}[/]");
+            AnsiConsole.MarkupLine(value: $"[green]✓[/] Profiling complete. Results saved to: [link]{Settings.GetGeneratedFilePath()}[/]");
 
             return 0;
         }
@@ -57,9 +57,8 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
 
     private static async Task RunProfiler(Settings settings)
     {
-        int    durationSeconds = settings.Duration;
-        int    rateSeconds     = settings.Rate;
-        string logPath         = settings.LogPath;
+        int durationSeconds = settings.Duration;
+        int rateSeconds     = settings.Rate;
 
         List<SystemSample> samples     = [];
         Stopwatch          stopwatch   = Stopwatch.StartNew();
@@ -76,15 +75,14 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
 
         string platform = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Windows" : RuntimeInformation.IsOSPlatform(OSPlatform.Linux) ? "Linux" : "macOS";
 
-        Grid infoGrid = new Grid().AddColumn()
-                                  .AddColumn()
+        Grid infoGrid = new Grid().Width(width: 50)
+                                  .AddColumns(count: 2)
                                   .AddRow("[grey]User:[/]", $"[white]{Environment.UserName}[/]")
                                   .AddRow("[grey]Machine:[/]", $"[white]{Environment.MachineName}[/]")
                                   .AddRow("[grey]Platform:[/]", $"[white]{platform}[/]")
                                   .AddRow("[grey]Processors:[/]", $"[white]{Environment.ProcessorCount}[/]")
                                   .AddRow("[grey]Duration:[/]", $"[white]{settings.Duration} seconds[/]")
-                                  .AddRow("[grey]Sample Rate:[/]", $"[white]Every {settings.Rate} second(s)[/]")
-                                  .AddRow("[grey]Log Path:[/]", $"[white]{settings.LogPath}[/]");
+                                  .AddRow("[grey]Sample Rate:[/]", $"[white]Every {settings.Rate} second(s)[/]");
 
         // Create a live display table
         Table metricsTable = new Table().Border(TableBorder.Rounded)
@@ -126,6 +124,13 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
                                      await Task.Delay(waitTime);
                                  }
                              }
+
+                             // Update the table once more to get a final sample and set the live table to 100%.
+                             SystemSample finalSample = CollectSample(sampleCount, cpuMonitor);
+
+                             samples.Add(finalSample);
+
+                             UpdateTable(metricsTable, finalSample, stopwatch.Elapsed, endTime, isFinalUpdate: true);
                          });
 
         AnsiConsole.WriteLine();
@@ -139,14 +144,14 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
         DisplaySummary(samples);
 
         // Write results to the log file
-        WriteLogFile(logPath, samples);
+        WriteLogFile(samples);
     }
 
-    private static void UpdateTable(Table table, SystemSample sample, TimeSpan elapsed, TimeSpan total)
+    private static void UpdateTable(Table table, SystemSample sample, TimeSpan elapsed, TimeSpan total, bool isFinalUpdate = false)
     {
         table.Rows.Clear();
 
-        double progress = elapsed.TotalSeconds / total.TotalSeconds * 100;
+        double progress = isFinalUpdate ? 100 : elapsed.TotalSeconds / total.TotalSeconds * 100;
 
         string cpuColour = sample.OverallCpuPercent switch
         {
@@ -255,7 +260,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
                                     .AddColumns(count: 2)
                                     .AddRow(summaryTable.Centered(), processTable.Centered());
 
-        AnsiConsole.Write(layoutGrid);
+        AnsiConsole.Write(renderable: Align.Center(layoutGrid));
         AnsiConsole.WriteLine();
     }
 
@@ -412,8 +417,10 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
         return (totalMb, usedMb, availableMb, usagePercent);
     }
 
-    private static void WriteLogFile(string path, List<SystemSample> samples)
+    private static void WriteLogFile(List<SystemSample> samples)
     {
+        DateTime generatedTime = DateTime.Now;
+
         StringBuilder sb = new();
 
         sb.AppendLine(value: "================================================================================")
@@ -422,7 +429,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
           .AppendLine()
           .AppendLine(handler: $"User: {Environment.UserName}")
           .AppendLine(handler: $"Machine: {Environment.MachineName}")
-          .AppendLine(handler: $"Generated: {DateTime.Now:yyyy-MM-dd HH:mm:ss}")
+          .AppendLine(handler: $"Generated: {generatedTime:yyyy-MM-dd HH:mm:ss}")
           .AppendLine(handler: $"Platform: {RuntimeInformation.OSDescription}")
           .AppendLine(handler: $"Processors: {Environment.ProcessorCount}")
           .AppendLine(handler: $"Total Samples: {samples.Count}");
@@ -438,7 +445,7 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
         {
             sb.AppendLine(value: "No samples collected.");
 
-            File.WriteAllText(path, contents: sb.ToString());
+            File.WriteAllText(path: Settings.DefineGeneratedFilePath(generatedTime), contents: sb.ToString());
 
             return;
         }
@@ -506,22 +513,30 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
             }
         }
 
-        File.WriteAllText(path, contents: sb.ToString());
+        File.WriteAllText(path: Settings.DefineGeneratedFilePath(generatedTime), contents: sb.ToString());
     }
 
     [ UsedImplicitly ]
     public sealed class Settings : CommandSettings
     {
-        private const string DefaultLogFileName = "profile.log";
+        private static string s_generatedFilePath = string.Empty;
 
-        [ CommandOption(template: "-d|--duration <SECONDS>"), Description(description: "Total duration to sample (in seconds)"), DefaultValue(value: 5) ]
-        public int Duration { get; init; } = 10;
+        public static readonly string DirectoryPath = Path.Combine(path1: Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path2: "System Profiling Results");
+
+        [ CommandOption(template: "-d|--duration <SECONDS>"), Description(description: "Total duration to sample (in seconds)"), DefaultValue(value: 60) ]
+        public int Duration { get; [ UsedImplicitly ] init; }
 
         [ CommandOption(template: "-r|--rate <SECONDS>"), Description(description: "Interval between samples (in seconds)"), DefaultValue(value: 2) ]
-        public int Rate { get; init; } = 2;
+        public int Rate { get; [ UsedImplicitly ] init; }
 
-        [ CommandOption(template: "-p|--path <FILE>"), Description(description: "Path to the output log file"), DefaultValue(DefaultLogFileName) ]
-        public string LogPath { get; private set; } = DefaultLogFileName;
+        public static string DefineGeneratedFilePath(DateTime generatedTime)
+        {
+            s_generatedFilePath = Path.Combine(DirectoryPath, path2: $"{generatedTime:yyyy-MM-dd HH-mm-ss}.txt");
+
+            return s_generatedFilePath;
+        }
+
+        public static string GetGeneratedFilePath() => s_generatedFilePath;
 
         public override ValidationResult Validate()
         {
@@ -533,18 +548,6 @@ public sealed class ProfileCommand : AsyncCommand<ProfileCommand.Settings>
             if (Rate <= 0)
             {
                 return ValidationResult.Error(message: "Rate must be a positive integer");
-            }
-
-            if (string.IsNullOrWhiteSpace(LogPath))
-            {
-                return ValidationResult.Error(message: "Log path cannot be empty");
-            }
-
-            if (LogPath.Equals(DefaultLogFileName, StringComparison.OrdinalIgnoreCase))
-            {
-                string userDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-                LogPath = Path.Combine(userDirectory, DefaultLogFileName);
             }
 
             return ValidationResult.Success();
